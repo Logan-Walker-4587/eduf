@@ -1,0 +1,5 @@
+streamlit
+sqlite3
+PyPDF2
+groq
+
