@@ -6,6 +6,7 @@ import PyPDF2
 from groq import Groq
 import re
 import html  # for unescaping HTML entities
+import pandas as pd  # For dashboard graph
 
 # ---------------------------------------------------------------------------------
 # ------------------------- CONFIGURATION -----------------------------------------
@@ -37,10 +38,57 @@ def init_db():
 
 init_db()
 
+# ---------------------------------------------------------------------------------
+# --------------------- FLASHCARD SESSION DATABASE SETUP --------------------------
+# ---------------------------------------------------------------------------------
+def init_session_db():
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute(
+        '''CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT,
+                session_name TEXT,
+                flashcards TEXT,
+                created_at TEXT
+         )'''
+    )
+    conn.commit()
+    conn.close()
+
+init_session_db()
+
 def update_user_analytics(username, analytics):
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
     c.execute("UPDATE users SET analytics=? WHERE username=?", (json.dumps(analytics), username))
+    conn.commit()
+    conn.close()
+
+# ---------------------------------------------------------------------------------
+# --------------------- FLASHCARD SESSION FUNCTIONS -------------------------------
+# ---------------------------------------------------------------------------------
+def create_session(session_name, flashcards):
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    created_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("INSERT INTO sessions (username, session_name, flashcards, created_at) VALUES (?, ?, ?, ?)",
+              (st.session_state["user"], session_name, json.dumps(flashcards), created_at))
+    conn.commit()
+    conn.close()
+
+def get_sessions(username):
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("SELECT id, session_name, flashcards, created_at FROM sessions WHERE username=?", (username,))
+    sessions = c.fetchall()
+    conn.close()
+    return sessions
+
+def delete_session(session_id):
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM sessions WHERE id=? AND username=?", (session_id, st.session_state["user"]))
     conn.commit()
     conn.close()
 
@@ -54,14 +102,14 @@ def login(username, password):
     user = c.fetchone()
     conn.close()
     
-    # Default analytics structure
     default_analytics = {
         "pdfs_uploaded": 0,
         "flashcards_generated": 0,
         "flashcards_viewed": 0,
         "tests_taken": 0,
         "last_test_score": 0,
-        "test_insights": ""
+        "test_insights": "",
+        "test_history": []  # To store date, time, and score of each test
     }
     
     if user:
@@ -84,7 +132,8 @@ def signup(username, password):
             "flashcards_viewed": 0,
             "tests_taken": 0,
             "last_test_score": 0,
-            "test_insights": ""
+            "test_insights": "",
+            "test_history": []
         })
         c.execute("INSERT INTO users (username, password, analytics) VALUES (?, ?, ?)",
                   (username, password, initial_analytics))
@@ -107,29 +156,21 @@ def extract_text_from_pdf(pdf_file):
     return text
 
 # ---------------------------------------------------------------------------------
-# ------------------------- HELPER FUNCTION FOR FLASHCARDS ------------------------
+# --------------------- HELPER FUNCTION FOR FLASHCARDS ----------------------------
 # ---------------------------------------------------------------------------------
 def clean_flashcard_text(text: str) -> str:
     """
-    1. Unescape HTML entities (&lt;/h3&gt; -> </h3>).
-    2. Remove HTML tags (<...>).
+    1. Unescape HTML entities.
+    2. Remove HTML tags.
     3. Remove common markers (Front:, Back:, etc.).
     4. Strip whitespace.
     """
-    # 1) Unescape HTML entities
     text = html.unescape(text)
-
-    # 2) Remove HTML tags
     text = re.sub(r"<[^>]*>", "", text)
-
-    # 3) Remove common markers
     markers = ["** front **", "**Front**", "(back front)", "** back **", "Front:", "Back:"]
     for marker in markers:
         text = text.replace(marker, "")
-
-    # 4) Strip whitespace
-    text = text.strip()
-    return text
+    return text.strip()
 
 # ---------------------------------------------------------------------------------
 # ------------------------- GROQ AI FUNCTIONS -------------------------------------
@@ -157,8 +198,7 @@ def generate_flashcard_question_groq(pdf_text, user_input, prev_question=""):
             model=API_MODEL
         )
         question_text = chat_completion.choices[0].message.content.strip()
-        question_text = clean_flashcard_text(question_text)
-        return question_text
+        return clean_flashcard_text(question_text)
     except Exception as e:
         st.error(f"Error generating flashcard question: {str(e)}")
         return "Error generating flashcard question."
@@ -185,8 +225,7 @@ def generate_flashcard_answer_groq(pdf_text, question):
             model=API_MODEL
         )
         answer_text = chat_completion.choices[0].message.content.strip()
-        answer_text = clean_flashcard_text(answer_text)
-        return answer_text
+        return clean_flashcard_text(answer_text)
     except Exception as e:
         st.error(f"Error generating flashcard answer: {str(e)}")
         return "Error generating flashcard answer."
@@ -212,8 +251,7 @@ def generate_simplified_explanation_groq(pdf_text, answer):
             model=API_MODEL
         )
         simplified_text = chat_completion.choices[0].message.content.strip()
-        simplified_text = clean_flashcard_text(simplified_text)
-        return simplified_text
+        return clean_flashcard_text(simplified_text)
     except Exception as e:
         st.error(f"Error simplifying explanation: {str(e)}")
         return "Error simplifying explanation."
@@ -240,7 +278,6 @@ def generate_test_questions_groq(pdf_text):
             model=API_MODEL
         )
         response_text = chat_completion.choices[0].message.content.strip()
-        # Extract valid JSON array by isolating text between first '[' and last ']'
         start_index = response_text.find('[')
         end_index = response_text.rfind(']')
         if start_index != -1 and end_index != -1:
@@ -273,7 +310,6 @@ def generate_test_insights_groq(score):
 def main():
     st.set_page_config(page_title="EduFlash", layout="wide", page_icon="📚")
     
-    # ---------------------- CUSTOM CSS STYLING -----------------------------------
     st.markdown("""
     <style>
     [data-testid="stMetricValue"] {
@@ -295,11 +331,11 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    # ---------------------- SIDEBAR MENU -----------------------------------------
+    # Sidebar menu now includes "Saved Flashcards"
     if "user" not in st.session_state:
         menu = ["Login", "Sign Up"]
     else:
-        menu = ["Dashboard", "Flashcards", "Test", "Logout"]
+        menu = ["Dashboard", "Flashcards", "Test", "Saved Flashcards", "Logout"]
     
     choice = st.sidebar.selectbox("Menu", menu, key="menu")
     
@@ -345,19 +381,35 @@ def main():
         with st.expander("Detailed Analytics"):
             st.write(f"**Flashcards Viewed:** {analytics.get('flashcards_viewed', 0)}")
             st.write(f"**Last Test Insights:** {analytics.get('test_insights', 'N/A')}")
+        
+        # Test History Graph and Table
+        with st.expander("Test History"):
+            test_history = analytics.get("test_history", [])
+            if test_history:
+                df = pd.DataFrame(test_history)
+                df["datetime"] = pd.to_datetime(df["date"] + " " + df["time"])
+                df = df.sort_values("datetime")
+                chart_data = df.set_index("datetime")["score"]
+                st.line_chart(chart_data)
+                st.table(df[["date", "time", "score"]])
+            else:
+                st.write("No test history available yet.")
     
     # ---------------------- FLASHCARDS SECTION -----------------------------------
     elif choice == "Flashcards":
         st.title("📖 Flashcard Generator")
-        # Upload PDF and persist the extracted text
+        
+        # Initialize current session flashcards if not already set
+        if "session_flashcards" not in st.session_state:
+            st.session_state["session_flashcards"] = []
+        
+        # Upload PDF and extract text
         uploaded_file = st.file_uploader("Upload PDF", type="pdf", key="pdf_uploader")
         
         if uploaded_file:
-            # Save PDF text in session state if not already done
             if "pdf_text" not in st.session_state:
                 pdf_text = extract_text_from_pdf(uploaded_file)
                 st.session_state["pdf_text"] = pdf_text
-                # Update analytics only once for PDF upload
                 if "pdf_uploaded_once" not in st.session_state:
                     st.session_state["analytics"]["pdfs_uploaded"] += 1
                     update_user_analytics(st.session_state["user"], st.session_state["analytics"])
@@ -365,7 +417,7 @@ def main():
             else:
                 pdf_text = st.session_state["pdf_text"]
             
-            # Get the user query if not already stored
+            # Get user query for flashcards
             if "flashcard_query" not in st.session_state or not st.session_state["flashcard_query"]:
                 user_input = st.text_input("Enter topic/question for flashcards:", key="flashcard_query")
                 if user_input:
@@ -373,7 +425,7 @@ def main():
             else:
                 user_input = st.session_state["flashcard_query"]
             
-            # Generate flashcard question if not already generated
+            # Generate a flashcard question if not already present
             if "current_flashcard_question" not in st.session_state:
                 question = generate_flashcard_question_groq(pdf_text, user_input, prev_question="")
                 st.session_state["current_flashcard_question"] = question
@@ -382,15 +434,12 @@ def main():
                 st.session_state["analytics"]["flashcards_generated"] += 1
                 update_user_analytics(st.session_state["user"], st.session_state["analytics"])
             
-            # Display the current flashcard question
+            # Display the flashcard question
             if "current_flashcard_question" in st.session_state:
-                # Clean up the question text
                 safe_question = clean_flashcard_text(st.session_state["current_flashcard_question"])
-                # If the question text begins with "Question:", remove that to avoid double mention
                 if safe_question.lower().startswith("question:"):
                     safe_question = safe_question[9:].strip()
 
-                # Use the same approach as the answer's display
                 with st.container():
                     st.markdown(f"""
                     <div class="flashcard">
@@ -400,7 +449,7 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
                 
-                # If answer is not revealed yet, show the Reveal Answer button
+                # Reveal Answer and subsequent actions
                 if not st.session_state["flashcard_reveal"]:
                     if st.button("Reveal Answer"):
                         answer = generate_flashcard_answer_groq(pdf_text, safe_question)
@@ -408,7 +457,6 @@ def main():
                         st.session_state["flashcard_reveal"] = True
                         st.rerun()
                 else:
-                    # Show the answer
                     safe_answer = clean_flashcard_text(st.session_state["current_flashcard_answer"])
                     with st.container():
                         st.markdown(f"""
@@ -417,13 +465,23 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
                     
-                    # "Didn't Understand" button to simplify explanation
                     if st.button("Didn't Understand"):
                         simpler_answer = generate_simplified_explanation_groq(pdf_text, safe_answer)
                         st.session_state["current_flashcard_answer"] = simpler_answer
                         st.rerun()
+                    
+                    # Button to add the current flashcard to the session
+                    if st.button("Add Flashcard to Session"):
+                        flashcard_data = {
+                            "question": safe_question,
+                            "answer": safe_answer,
+                            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        st.session_state["session_flashcards"].append(flashcard_data)
+                        st.success("Flashcard added to session.")
+                        st.rerun()
                 
-                # Button to generate the next flashcard question (avoiding repetition)
+                # Button to generate the next flashcard (avoiding repetition)
                 if st.button("Next Flashcard"):
                     prev_question = st.session_state["current_flashcard_question"]
                     new_question = generate_flashcard_question_groq(pdf_text, user_input, prev_question=prev_question)
@@ -433,17 +491,34 @@ def main():
                     st.session_state["analytics"]["flashcards_viewed"] += 1
                     update_user_analytics(st.session_state["user"], st.session_state["analytics"])
                     st.rerun()
+            
+            # Display current session flashcards (not yet saved permanently)
+            if st.session_state["session_flashcards"]:
+                st.markdown("### Current Flashcard Session")
+                st.write(f"Total flashcards in session: {len(st.session_state['session_flashcards'])}")
+                for idx, fc in enumerate(st.session_state["session_flashcards"], start=1):
+                    st.write(f"**Flashcard {idx}:**")
+                    st.write(f"Q: {fc.get('question', '')}")
+                    st.write(f"A: {fc.get('answer', '')}")
+                    st.write(f"Added on: {fc.get('timestamp', '')}")
+                    st.write("---")
+                
+                # Button to save the entire current session permanently
+                if st.button("Save Flashcard Session"):
+                    session_name = "Session " + time.strftime("%Y-%m-%d %H:%M:%S")
+                    create_session(session_name, st.session_state["session_flashcards"])
+                    st.success("Flashcard session saved permanently.")
+                    st.session_state["session_flashcards"] = []
+                    st.rerun()
         else:
             st.info("Please upload a PDF to generate flashcards.")
     
     # ---------------------- TEST SECTION -----------------------------------------
     elif choice == "Test":
         st.title("📝 Knowledge Test")
-        # Check if a PDF was uploaded by verifying pdf_text in session state
         if "pdf_text" not in st.session_state:
             st.info("No PDF uploaded yet. Please upload a PDF in the Flashcards section to generate a test.")
         else:
-            # If test questions are not yet generated, provide a button to create them
             if "test_questions" not in st.session_state:
                 if st.button("Generate Test Questions"):
                     test_questions = generate_test_questions_groq(st.session_state["pdf_text"])
@@ -452,7 +527,6 @@ def main():
                     else:
                         st.error("Failed to generate test questions. Please try again.")
             
-            # If test questions exist, display the test interface
             if "test_questions" in st.session_state:
                 answers = {}
                 for i, q in enumerate(st.session_state["test_questions"]):
@@ -470,10 +544,18 @@ def main():
                             score += 1
                     
                     insights = generate_test_insights_groq(score)
+                    current_date = time.strftime("%Y-%m-%d")
+                    current_time = time.strftime("%H:%M:%S")
+                    
                     st.session_state["analytics"].update({
                         "tests_taken": st.session_state["analytics"].get("tests_taken", 0) + 1,
                         "last_test_score": score,
                         "test_insights": insights
+                    })
+                    st.session_state["analytics"].setdefault("test_history", []).append({
+                        "date": current_date,
+                        "time": current_time,
+                        "score": score
                     })
                     update_user_analytics(st.session_state["user"], st.session_state["analytics"])
                     
@@ -481,7 +563,6 @@ def main():
                     with st.expander("Test Insights"):
                         st.write(insights)
                     
-                    # Provide detailed test review
                     st.subheader("Test Review")
                     for i, q in enumerate(st.session_state["test_questions"]):
                         st.write(f"**Question {i+1}:** {clean_flashcard_text(q['question'])}")
@@ -493,15 +574,33 @@ def main():
                             st.error("❌ Incorrect")
                         st.write("---")
                     
-                    # Clear test questions after submission to avoid repetition
                     del st.session_state["test_questions"]
+    
+    # ---------------------- SAVED FLASHCARDS SECTION -------------------------------
+    elif choice == "Saved Flashcards":
+        st.title("💾 Saved Flashcard Sessions")
+        sessions = get_sessions(st.session_state["user"])
+        if sessions:
+            for session in sessions:
+                session_id, session_name, flashcards_json, created_at = session
+                st.markdown(f"**{session_name}** (Created: {created_at})")
+                try:
+                    flashcards = json.loads(flashcards_json) if flashcards_json else []
+                except Exception:
+                    flashcards = []
+                if flashcards:
+                    for idx, fc in enumerate(flashcards, start=1):
+                        st.write(f"**Flashcard {idx}:**")
+                        st.write(f"Q: {fc.get('question', '')}")
+                        st.write(f"A: {fc.get('answer', '')}")
+                        st.write(f"Saved on: {fc.get('timestamp', '')}")
+                        st.write("---")
+                if st.button("Delete Session", key=f"delete_session_{session_id}"):
+                    delete_session(session_id)
+                    st.success("Session deleted.")
+                    st.rerun()
+        else:
+            st.info("No saved flashcard sessions available.")
 
-# ---------------------------------------------------------------------------------
-# ------------------------- EXECUTE MAIN FUNCTION ---------------------------------
-# ---------------------------------------------------------------------------------
 if __name__ == "__main__":
     main()
-
-# ---------------------------------------------------------------------------------
-# ------------------------- END OF CODE -------------------------------------------
-
