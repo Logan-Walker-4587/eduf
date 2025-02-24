@@ -5,26 +5,31 @@ import time
 import PyPDF2
 from groq import Groq
 
-# ----- CONFIGURATION -----
+# ---------------------------------------------------------------------------------
+# ------------------------- CONFIGURATION -----------------------------------------
+# ---------------------------------------------------------------------------------
 API_MODEL = "gemma2-9b-it"
 GROQ_API_KEY = "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"
 
-# ----- DATABASE SETUP -----
+# ---------------------------------------------------------------------------------
+# ------------------------- DATABASE SETUP ----------------------------------------
+# ---------------------------------------------------------------------------------
 def init_db():
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
+    c.execute(
+        '''CREATE TABLE IF NOT EXISTS users (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  username TEXT UNIQUE,
                  password TEXT,
-                 analytics TEXT)''')
-    
+                 analytics TEXT
+         )'''
+    )
     # Check and add analytics column if missing
     c.execute("PRAGMA table_info(users)")
     columns = [col[1] for col in c.fetchall()]
-    if 'analytics' not in columns:
+    if "analytics" not in columns:
         c.execute("ALTER TABLE users ADD COLUMN analytics TEXT")
-    
     conn.commit()
     conn.close()
 
@@ -37,7 +42,9 @@ def update_user_analytics(username, analytics):
     conn.commit()
     conn.close()
 
-# ----- AUTHENTICATION -----
+# ---------------------------------------------------------------------------------
+# ------------------------- AUTHENTICATION FUNCTIONS ------------------------------
+# ---------------------------------------------------------------------------------
 def login(username, password):
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
@@ -45,7 +52,7 @@ def login(username, password):
     user = c.fetchone()
     conn.close()
     
-    # Define default analytics to use if none exists in the DB
+    # Default analytics structure
     default_analytics = {
         "pdfs_uploaded": 0,
         "flashcards_generated": 0,
@@ -85,7 +92,9 @@ def signup(username, password):
         st.error("Username already exists")
     conn.close()
 
-# ----- PDF TEXT EXTRACTION -----
+# ---------------------------------------------------------------------------------
+# ------------------------- PDF TEXT EXTRACTION -----------------------------------
+# ---------------------------------------------------------------------------------
 def extract_text_from_pdf(pdf_file):
     text = ""
     reader = PyPDF2.PdfReader(pdf_file)
@@ -95,7 +104,9 @@ def extract_text_from_pdf(pdf_file):
             text += extracted
     return text
 
-# ----- GROQ AI FUNCTIONS -----
+# ---------------------------------------------------------------------------------
+# ------------------------- GROQ AI FUNCTIONS -------------------------------------
+# ---------------------------------------------------------------------------------
 def generate_flashcard_response_groq(pdf_text, user_input):
     client = Groq(api_key=GROQ_API_KEY)
     max_text_length = 1500
@@ -147,11 +158,13 @@ def generate_test_insights_groq(score):
     except Exception as e:
         return ""
 
-# ----- MAIN UI -----
+# ---------------------------------------------------------------------------------
+# ------------------------- MAIN USER INTERFACE -----------------------------------
+# ---------------------------------------------------------------------------------
 def main():
     st.set_page_config(page_title="EduFlash", layout="wide", page_icon="📚")
     
-    # Custom CSS
+    # ---------------------- CUSTOM CSS STYLING -----------------------------------
     st.markdown("""
     <style>
     [data-testid="stMetricValue"] {
@@ -173,29 +186,38 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    menu = ["Login", "Sign Up"] if not st.session_state.get("user") else ["Dashboard", "Flashcards", "Test", "Logout"]
+    # ---------------------- SIDEBAR MENU -----------------------------------------
+    if "user" not in st.session_state:
+        menu = ["Login", "Sign Up"]
+    else:
+        menu = ["Dashboard", "Flashcards", "Test", "Logout"]
+    
     choice = st.sidebar.selectbox("Menu", menu, key="menu")
     
+    # ---------------------- LOGIN SECTION ----------------------------------------
     if choice == "Login":
         with st.container():
             st.title("🔒 Login")
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
+            username = st.text_input("Username", key="login_username")
+            password = st.text_input("Password", type="password", key="login_password")
             if st.button("Login", use_container_width=True):
                 login(username, password)
-    
+                
+    # ---------------------- SIGN UP SECTION --------------------------------------
     elif choice == "Sign Up":
         with st.container():
             st.title("📝 Sign Up")
-            username = st.text_input("Choose Username", key="signup_user")
-            password = st.text_input("Choose Password", type="password", key="signup_pass")
+            username = st.text_input("Choose Username", key="signup_username")
+            password = st.text_input("Choose Password", type="password", key="signup_password")
             if st.button("Create Account", use_container_width=True):
                 signup(username, password)
-    
+                
+    # ---------------------- LOGOUT SECTION ---------------------------------------
     elif choice == "Logout":
         st.session_state.clear()
         st.rerun()
     
+    # ---------------------- DASHBOARD SECTION ------------------------------------
     elif choice == "Dashboard":
         st.title("📊 Learning Dashboard")
         st.write(f"Welcome back, {st.session_state['user']}! 🎉")
@@ -208,7 +230,6 @@ def main():
             ("Tests Taken", "📝", analytics.get("tests_taken", 0)),
             ("Avg Score", "🎯", f"{analytics.get('last_test_score', 0)}/10")
         ]
-        
         for col, (title, icon, value) in zip(cols, metrics):
             col.metric(title, f"{icon} {value}")
         
@@ -216,57 +237,93 @@ def main():
             st.write(f"**Flashcards Viewed:** {analytics.get('flashcards_viewed', 0)}")
             st.write(f"**Last Test Insights:** {analytics.get('test_insights', 'N/A')}")
     
+    # ---------------------- FLASHCARDS SECTION -----------------------------------
     elif choice == "Flashcards":
         st.title("📖 Flashcard Generator")
-        uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+        # Upload PDF and persist the extracted text
+        uploaded_file = st.file_uploader("Upload PDF", type="pdf", key="pdf_uploader")
         
         if uploaded_file:
-            pdf_text = extract_text_from_pdf(uploaded_file)
-            if "pdf_uploaded_once" not in st.session_state:
-                st.session_state["analytics"]["pdfs_uploaded"] += 1
-                update_user_analytics(st.session_state["user"], st.session_state["analytics"])
-                st.session_state["pdf_uploaded_once"] = True
+            # Save PDF text in session state if not already done
+            if "pdf_text" not in st.session_state:
+                pdf_text = extract_text_from_pdf(uploaded_file)
+                st.session_state["pdf_text"] = pdf_text
+                # Update analytics only once for PDF upload
+                if "pdf_uploaded_once" not in st.session_state:
+                    st.session_state["analytics"]["pdfs_uploaded"] += 1
+                    update_user_analytics(st.session_state["user"], st.session_state["analytics"])
+                    st.session_state["pdf_uploaded_once"] = True
+            else:
+                pdf_text = st.session_state["pdf_text"]
             
-            user_input = st.text_input("Enter topic/question for flashcard:")
-            if user_input:
-                response = generate_flashcard_response_groq(pdf_text, user_input)
-                st.session_state.setdefault("flashcards_history", []).append(response)
-                st.session_state["analytics"]["flashcards_generated"] += 1
-                update_user_analytics(st.session_state["user"], st.session_state["analytics"])
-                
+            # Use the user's query only to generate the initial flashcard topic.
+            # The flashcard is stored in session state so it doesn't get repeated.
+            if "current_flashcard" not in st.session_state:
+                user_input = st.text_input("Enter topic/question for flashcard:", key="flashcard_query")
+                if user_input:
+                    flashcard = generate_flashcard_response_groq(pdf_text, user_input)
+                    st.session_state["current_flashcard"] = flashcard
+                    st.session_state["analytics"]["flashcards_generated"] += 1
+                    update_user_analytics(st.session_state["user"], st.session_state["analytics"])
+            else:
+                # Keep the text input empty after the first flashcard generation
+                user_input = st.text_input("Enter topic/question for flashcard:", key="flashcard_query", value="")
+            
+            # Display the current flashcard if available
+            if "current_flashcard" in st.session_state:
                 with st.container():
                     st.markdown(f"""
                     <div class="flashcard">
                         <h3 style='text-align:center;border-bottom: 1px solid #4CAF50;padding-bottom: 0.5rem;'>
-                            {user_input}
+                            {st.session_state.get("flashcard_query", "Flashcard Topic")}
                         </h3>
-                        <p style='text-align:center;margin-top: 1rem;'>{response}</p>
+                        <p style='text-align:center;margin-top: 1rem;'>{st.session_state["current_flashcard"]}</p>
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    c1, c2 = st.columns(2)
-                    with c1:
+                    # Options to modify the flashcard without creating duplicates
+                    col1, col2 = st.columns(2)
+                    with col1:
                         if st.button("Simplify Explanation"):
                             simplified = generate_flashcard_response_groq(pdf_text, "Simplify this explanation")
-                            st.session_state["flashcards_history"].append(simplified)
-                            st.rerun()
-                    with c2:
-                        if st.button("Generate New"):
-                            st.session_state["analytics"]["flashcards_viewed"] += 1
+                            st.session_state["current_flashcard"] = simplified
+                            st.session_state["analytics"]["flashcards_generated"] += 1
                             update_user_analytics(st.session_state["user"], st.session_state["analytics"])
                             st.rerun()
+                    with col2:
+                        if st.button("Generate New"):
+                            if "flashcard_query" in st.session_state and st.session_state["flashcard_query"]:
+                                new_flashcard = generate_flashcard_response_groq(pdf_text, st.session_state["flashcard_query"])
+                                # Only update if the new flashcard is different to avoid duplicates
+                                if new_flashcard != st.session_state["current_flashcard"]:
+                                    st.session_state["current_flashcard"] = new_flashcard
+                                    st.session_state["analytics"]["flashcards_viewed"] += 1
+                                    update_user_analytics(st.session_state["user"], st.session_state["analytics"])
+                                else:
+                                    st.info("Generated flashcard is the same as the current one. Try modifying the query.")
+                            else:
+                                st.error("No flashcard topic provided.")
+                            st.rerun()
+        else:
+            st.info("Please upload a PDF to generate flashcards.")
     
+    # ---------------------- TEST SECTION -----------------------------------------
     elif choice == "Test":
         st.title("📝 Knowledge Test")
-        uploaded_file = st.file_uploader("Upload PDF for Test", type="pdf", key="test_pdf")
-        
-        if uploaded_file:
-            pdf_text = extract_text_from_pdf(uploaded_file)
-            if "test_generated" not in st.session_state:
-                questions = generate_test_questions_groq(pdf_text)
-                st.session_state["test_questions"] = questions
-                st.session_state["test_generated"] = True
+        # Check if a PDF was uploaded by verifying pdf_text in session state
+        if "pdf_text" not in st.session_state:
+            st.info("No PDF uploaded yet. Please upload a PDF in the Flashcards section to generate a test.")
+        else:
+            # If test questions are not yet generated, provide a button to create them
+            if "test_questions" not in st.session_state:
+                if st.button("Generate Test Questions"):
+                    test_questions = generate_test_questions_groq(st.session_state["pdf_text"])
+                    if test_questions:
+                        st.session_state["test_questions"] = test_questions
+                    else:
+                        st.error("Failed to generate test questions. Please try again.")
             
+            # If test questions exist, display the test interface
             if "test_questions" in st.session_state:
                 answers = {}
                 for i, q in enumerate(st.session_state["test_questions"]):
@@ -276,9 +333,8 @@ def main():
                 
                 if st.button("Submit Test"):
                     score = sum(1 for i, q in enumerate(st.session_state["test_questions"]) 
-                             if answers[i] == q["correct"])
+                                if answers.get(i) == q["correct"])
                     insights = generate_test_insights_groq(score)
-                    
                     st.session_state["analytics"].update({
                         "tests_taken": st.session_state["analytics"].get("tests_taken", 0) + 1,
                         "last_test_score": score,
@@ -289,6 +345,108 @@ def main():
                     st.success(f"Score: {score}/10")
                     with st.expander("Test Insights"):
                         st.write(insights)
+                    
+                    # Provide detailed test review
+                    st.subheader("Test Review")
+                    for i, q in enumerate(st.session_state["test_questions"]):
+                        st.write(f"**Question {i+1}:** {q['question']}")
+                        st.write(f"**Your Answer:** {answers.get(i, 'No answer')}")
+                        st.write(f"**Correct Answer:** {q['correct']}")
+                        if answers.get(i) == q["correct"]:
+                            st.success("✅ Correct")
+                        else:
+                            st.error("❌ Incorrect")
+                        st.write("---")
+                    
+                    # Clear test questions after submission to avoid repetition
+                    del st.session_state["test_questions"]
 
+# ---------------------------------------------------------------------------------
+# ------------------------- EXECUTE MAIN FUNCTION -------------------------------
+# ---------------------------------------------------------------------------------
 if __name__ == "__main__":
     main()
+
+# ---------------------------------------------------------------------------------
+# ------------------------- ADDITIONAL PADDING ------------------------------------
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+# ------------------------- END OF CODE -----------------------------------------
