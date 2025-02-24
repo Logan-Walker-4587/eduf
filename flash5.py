@@ -5,7 +5,7 @@ import time
 import PyPDF2
 from groq import Groq
 import re
-import html  # to unescape HTML entities if needed
+import html  # for unescaping HTML entities
 
 # ---------------------------------------------------------------------------------
 # ------------------------- CONFIGURATION -----------------------------------------
@@ -111,21 +111,23 @@ def extract_text_from_pdf(pdf_file):
 # ---------------------------------------------------------------------------------
 def clean_flashcard_text(text: str) -> str:
     """
-    Remove common markers, HTML tags, and extra spaces.
-    Also unescape any HTML entities.
+    1. Unescape HTML entities (&lt;/h3&gt; -> </h3>).
+    2. Remove HTML tags (<...>).
+    3. Remove common markers (Front:, Back:, etc.).
+    4. Strip whitespace.
     """
-    # Remove common markers
+    # 1) Unescape HTML entities
+    text = html.unescape(text)
+
+    # 2) Remove HTML tags
+    text = re.sub(r"<[^>]*>", "", text)
+
+    # 3) Remove common markers
     markers = ["** front **", "**Front**", "(back front)", "** back **", "Front:", "Back:"]
     for marker in markers:
         text = text.replace(marker, "")
 
-    # Remove any HTML tags
-    text = re.sub(r"<[^>]*>", "", text)  # remove everything between < >
-
-    # Unescape HTML entities (e.g., &nbsp;, &amp;, etc.)
-    text = html.unescape(text)
-
-    # Trim extra whitespace
+    # 4) Strip whitespace
     text = text.strip()
     return text
 
@@ -133,15 +135,10 @@ def clean_flashcard_text(text: str) -> str:
 # ------------------------- GROQ AI FUNCTIONS -------------------------------------
 # ---------------------------------------------------------------------------------
 def generate_flashcard_question_groq(pdf_text, user_input, prev_question=""):
-    """
-    Generate a single flashcard question from the given PDF text and user topic,
-    ensuring no HTML is included in the LLM's output.
-    """
     client = Groq(api_key=GROQ_API_KEY)
     max_text_length = 1500
     pdf_text = pdf_text[:max_text_length]
 
-    # Instruct the model to return plain text only
     prompt_template = (
         "You are an expert tutor helping a student understand complex documents.\n"
         "The document content is as follows:\n\n"
@@ -152,8 +149,8 @@ def generate_flashcard_question_groq(pdf_text, user_input, prev_question=""):
         "- If a previous flashcard question was provided ('{prev_question}'), ensure the new question is different.\n"
         "- Output only plain text, starting with 'Question:' and then the question. No HTML.\n"
     )
-
     prompt = prompt_template.format(pdf_text=pdf_text, user_input=user_input, prev_question=prev_question)
+    
     try:
         chat_completion = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
@@ -167,10 +164,6 @@ def generate_flashcard_question_groq(pdf_text, user_input, prev_question=""):
         return "Error generating flashcard question."
 
 def generate_flashcard_answer_groq(pdf_text, question):
-    """
-    Generate a detailed, accurate answer to the given question from the PDF text,
-    ensuring the response is plain text only.
-    """
     client = Groq(api_key=GROQ_API_KEY)
     max_text_length = 1500
     pdf_text = pdf_text[:max_text_length]
@@ -184,8 +177,8 @@ def generate_flashcard_answer_groq(pdf_text, question):
         "Please provide a detailed and accurate answer in plain text only.\n"
         "Do not include any labels like 'Answer:' or use any HTML. Just return the text.\n"
     )
-
     prompt = prompt_template.format(pdf_text=pdf_text, question=question)
+    
     try:
         chat_completion = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
@@ -199,10 +192,6 @@ def generate_flashcard_answer_groq(pdf_text, question):
         return "Error generating flashcard answer."
 
 def generate_simplified_explanation_groq(pdf_text, answer):
-    """
-    If the user clicks 'Didn't Understand', we generate
-    a simpler explanation of the current answer, in plain text.
-    """
     client = Groq(api_key=GROQ_API_KEY)
     max_text_length = 1500
     pdf_text = pdf_text[:max_text_length]
@@ -215,8 +204,8 @@ def generate_simplified_explanation_groq(pdf_text, answer):
         "Please re-explain this answer in simpler terms, step by step, avoiding complex jargon.\n"
         "Return only plain text, with no HTML.\n"
     )
-
     prompt = prompt_template.format(pdf_text=pdf_text, answer=answer)
+    
     try:
         chat_completion = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
@@ -230,9 +219,6 @@ def generate_simplified_explanation_groq(pdf_text, answer):
         return "Error simplifying explanation."
 
 def generate_test_questions_groq(pdf_text):
-    """
-    Generate 10 multiple-choice questions in JSON format, with plain text only.
-    """
     client = Groq(api_key=GROQ_API_KEY)
     max_text_length = 1500
     pdf_text = pdf_text[:max_text_length]
@@ -245,17 +231,15 @@ def generate_test_questions_groq(pdf_text):
         "  'options': a list of 4 possible answers in plain text,\n"
         "  'correct': the correct option in plain text.\n"
         "Return as a JSON array, with no extra text or HTML.\n"
-        "Return as a valid JSON array. No extra text. No code fences."
     )
-
     prompt = prompt_template.format(pdf_text=pdf_text)
+    
     try:
         chat_completion = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model=API_MODEL
         )
         response_text = chat_completion.choices[0].message.content.strip()
-        # Attempt to parse JSON
         test_questions = json.loads(response_text)
         return test_questions
     except Exception as e:
@@ -263,9 +247,6 @@ def generate_test_questions_groq(pdf_text):
         return []
 
 def generate_test_insights_groq(score):
-    """
-    Generate concise learning insights for the given test score, in plain text.
-    """
     client = Groq(api_key=GROQ_API_KEY)
     prompt = (
         f"You are an expert tutor. Provide concise learning insights for a test score of {score}/10.\n"
@@ -398,16 +379,19 @@ def main():
             
             # Display the current flashcard question
             if "current_flashcard_question" in st.session_state:
-                # Double-check that we remove any leftover HTML before rendering
+                # Clean up the question text
                 safe_question = clean_flashcard_text(st.session_state["current_flashcard_question"])
-                
+                # If the question text begins with "Question:", remove that to avoid double mention
+                if safe_question.lower().startswith("question:"):
+                    safe_question = safe_question[9:].strip()
+
+                # Use the same approach as the answer's display
                 with st.container():
                     st.markdown(f"""
                     <div class="flashcard">
-                        <h3 style='text-align:center;border-bottom: 1px solid #4CAF50;padding-bottom: 0.5rem;'>
-                            {st.session_state.get("flashcard_query", "Flashcard Topic")}
-                        </h3>
-                        <p style='text-align:center;margin-top: 1rem;'><strong>Question:</strong> {safe_question}</p>
+                        <p style='text-align:center;margin-top: 1rem;'>
+                            <strong>Question:</strong> {safe_question}
+                        </p>
                     </div>
                     """, unsafe_allow_html=True)
                 
@@ -469,16 +453,13 @@ def main():
                 for i, q in enumerate(st.session_state["test_questions"]):
                     with st.container():
                         st.subheader(f"Question {i+1}")
-                        # Clean the question text and options just in case
                         question_text = clean_flashcard_text(q["question"])
                         options = [clean_flashcard_text(opt) for opt in q["options"]]
-
                         answers[i] = st.radio(question_text, options, key=f"q_{i}")
                 
                 if st.button("Submit Test"):
                     score = 0
                     for i, q in enumerate(st.session_state["test_questions"]):
-                        # Clean the correct answer text
                         correct_answer = clean_flashcard_text(q["correct"])
                         if answers.get(i) == correct_answer:
                             score += 1
@@ -515,6 +496,3 @@ def main():
 # ---------------------------------------------------------------------------------
 if __name__ == "__main__":
     main()
-
-# ---------------------------------------------------------------------------------
-# ------------------------- END OF CODE -------------------------------------------
