@@ -297,12 +297,23 @@ def generate_test_questions_groq(pdf_text):
         st.error(f"Error generating test questions: {str(e)}")
         return []
 
-def generate_test_insights_groq(score):
+def generate_test_insights_groq(score, wrong_qas=None):
+    if wrong_qas is None:
+        wrong_qas = []
     client = Groq(api_key=GROQ_API_KEY)
     prompt = (
-        f"You are an expert tutor. Provide concise learning insights for a test score of {score}/10.\n"
-        "Return only plain text, with no HTML."
+        f"You are an expert tutor. Provide detailed learning insights for a test score of {score}/10.\n"
+        "Return only plain text, with no HTML.\n"
     )
+    if wrong_qas:
+        wrong_details = "\n".join([f"Question: {item['question']}\nAnswer: {item['answer']}" for item in wrong_qas])
+        prompt += (
+            "The student answered the following questions incorrectly:\n" +
+            wrong_details +
+            "\nPlease analyze the mistakes and suggest areas for improvement."
+        )
+    else:
+        prompt += "No specific wrong questions provided."
     try:
         chat_completion = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
@@ -415,7 +426,7 @@ def main():
         # Upload PDF and extract text
         uploaded_file = st.file_uploader("Upload PDF", type="pdf", key="pdf_uploader")
         
-        if uploaded_file:
+        if uploaded_file or "pdf_text" in st.session_state:
             if "pdf_text" not in st.session_state:
                 pdf_text = extract_text_from_pdf(uploaded_file)
                 st.session_state["pdf_text"] = pdf_text
@@ -427,20 +438,20 @@ def main():
                 pdf_text = st.session_state["pdf_text"]
             
             # Get user query for flashcards
-            if "flashcard_query" not in st.session_state or not st.session_state["flashcard_query"]:
-                user_input = st.text_input("Enter topic/question for flashcards:", key="flashcard_query")
-                if user_input:
-                    st.session_state["flashcard_query"] = user_input
-            else:
-                user_input = st.session_state["flashcard_query"]
-            
-            # Generate a flashcard question if not already present
-            if "current_flashcard_question" not in st.session_state:
+            user_input = st.text_input("Enter topic/question for flashcards:", key="flashcard_query")
+            if user_input and "current_flashcard_question" not in st.session_state:
                 question = generate_flashcard_question_groq(pdf_text, user_input, prev_question="")
                 st.session_state["current_flashcard_question"] = question
                 st.session_state["current_flashcard_answer"] = ""
                 st.session_state["flashcard_reveal"] = False
-                st.session_state["analytics"]["flashcards_generated"] += 1
+                st.session_state["analytics"]["flashcards_generated"] = st.session_state["analytics"].get("flashcards_generated", 0) + 1
+                update_user_analytics(st.session_state["user"], st.session_state["analytics"])
+            elif st.button("Generate Flashcard"):
+                question = generate_flashcard_question_groq(pdf_text, user_input, prev_question=st.session_state.get("current_flashcard_question", ""))
+                st.session_state["current_flashcard_question"] = question
+                st.session_state["current_flashcard_answer"] = ""
+                st.session_state["flashcard_reveal"] = False
+                st.session_state["analytics"]["flashcards_generated"] = st.session_state["analytics"].get("flashcards_generated", 0) + 1
                 update_user_analytics(st.session_state["user"], st.session_state["analytics"])
             
             # Display the flashcard question
@@ -547,12 +558,18 @@ def main():
                 
                 if st.button("Submit Test"):
                     score = 0
+                    wrong_qas = []
                     for i, q in enumerate(st.session_state["test_questions"]):
                         correct_answer = clean_flashcard_text(q["correct"])
                         if answers.get(i) == correct_answer:
                             score += 1
+                        else:
+                            wrong_qas.append({
+                                "question": question_text,
+                                "answer": answers.get(i)
+                            })
                     
-                    insights = generate_test_insights_groq(score)
+                    insights = generate_test_insights_groq(score, wrong_qas)
                     current_date = time.strftime("%Y-%m-%d")
                     current_time = time.strftime("%H:%M:%S")
                     
@@ -574,7 +591,7 @@ def main():
                     
                     st.subheader("Test Review")
                     for i, q in enumerate(st.session_state["test_questions"]):
-                        st.write(f"**Question {i+1}:** {clean_flashcard_text(q['question'])}")
+                        st.write(f"**Question {i+1}:**")
                         st.write(f"**Your Answer:** {answers.get(i, 'No answer')}")
                         st.write(f"**Correct Answer:** {clean_flashcard_text(q['correct'])}")
                         if answers.get(i) == clean_flashcard_text(q['correct']):
