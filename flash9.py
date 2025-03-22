@@ -36,11 +36,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
-
-# ---------------------------------------------------------------------------------
-# --------------------- FLASHCARD SESSION DATABASE SETUP --------------------------
-# ---------------------------------------------------------------------------------
 def init_session_db():
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
@@ -56,7 +51,38 @@ def init_session_db():
     conn.commit()
     conn.close()
 
+def init_community_db():
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute(
+        '''CREATE TABLE IF NOT EXISTS communities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                description TEXT,
+                flashcards TEXT,
+                created_at TEXT,
+                owner TEXT
+         )'''
+    )
+    # Check and add owner column if missing
+    c.execute("PRAGMA table_info(communities)")
+    columns = [col[1] for col in c.fetchall()]
+    if "owner" not in columns:
+        c.execute("ALTER TABLE communities ADD COLUMN owner TEXT")
+    c.execute(
+        '''CREATE TABLE IF NOT EXISTS community_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                community_id INTEGER,
+                username TEXT,
+                joined_at TEXT
+         )'''
+    )
+    conn.commit()
+    conn.close()
+
+init_db()
 init_session_db()
+init_community_db()
 
 def update_user_analytics(username, analytics):
     conn = sqlite3.connect("users.db")
@@ -100,6 +126,63 @@ def get_community_sessions(current_user):
     sessions = c.fetchall()
     conn.close()
     return sessions
+
+# NEW: Function to create a community
+def create_community(community_name, community_desc, flashcards):
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    created_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    owner = st.session_state["user"]
+    c.execute("INSERT INTO communities (name, description, flashcards, created_at, owner) VALUES (?, ?, ?, ?, ?)",
+              (community_name, community_desc, json.dumps(flashcards), created_at, owner))
+    community_id = c.lastrowid
+    c.execute("INSERT INTO community_members (community_id, username, joined_at) VALUES (?, ?, ?)",
+              (community_id, owner, created_at))
+    conn.commit()
+    conn.close()
+
+# NEW: Function to join a community
+def join_community(community_id):
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    joined_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("INSERT INTO community_members (community_id, username, joined_at) VALUES (?, ?, ?)",
+              (community_id, st.session_state["user"], joined_at))
+    conn.commit()
+    conn.close()
+
+# NEW: Function to leave a community
+def leave_community(community_id):
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM community_members WHERE community_id=? AND username=?", (community_id, st.session_state["user"]))
+    conn.commit()
+    conn.close()
+
+# NEW: Function to get user communities
+def get_owned_communities(username):
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("SELECT id, name, flashcards FROM communities WHERE owner = ?", (username,))
+    communities = c.fetchall()
+    conn.close()
+    return communities
+
+def get_joined_communities(username):
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("SELECT community_id FROM community_members WHERE username = ?", (username,))
+    community_ids = [row[0] for row in c.fetchall()]
+    conn.close()
+    return community_ids
+
+def get_all_communities():
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("SELECT id, owner, name, flashcards, created_at FROM communities")
+    communities = c.fetchall()
+    conn.close()
+    return communities
 
 # ---------------------------------------------------------------------------------
 # ------------------------- AUTHENTICATION FUNCTIONS ------------------------------
@@ -207,6 +290,16 @@ def clean_flashcard_text(text: str) -> str:
     for marker in markers:
         text = text.replace(marker, "")
     return text.strip()
+
+# Format flashcards for display
+def format_flashcards(flashcards):
+    formatted = ""
+    for idx, fc in enumerate(json.loads(flashcards), start=1):
+        formatted += f"**Flashcard {idx}:**\n"
+        formatted += f"- **Question:** {fc.get('question', '')}\n"
+        formatted += f"- **Answer:** {fc.get('answer', '')}\n"
+        formatted += f"- **Saved on:** {fc.get('timestamp', '')}\n\n"
+    return formatted
 
 # ---------------------------------------------------------------------------------
 # ------------------------- GROQ AI FUNCTIONS -------------------------------------
@@ -629,54 +722,76 @@ def main():
                     
                     del st.session_state["test_questions"]
     
-    # ---------------------- SAVED FLASHCARDS SECTION -------------------------------
+    # ---------------------- SAVED FLASHCARDS SECTION -----------------------------
     elif choice == "Saved Flashcards":
-        st.title("💾 Saved Flashcard Sessions")
+        st.title("💾 Saved Flashcards")
         sessions = get_sessions(st.session_state["user"])
         if sessions:
-            for session in sessions:
-                session_id, session_name, flashcards_json, created_at = session
-                st.markdown(f"**{session_name}** (Created: {created_at})")
-                try:
-                    flashcards = json.loads(flashcards_json) if flashcards_json else []
-                except Exception:
-                    flashcards = []
-                if flashcards:
-                    for idx, fc in enumerate(flashcards, start=1):
-                        st.write(f"**Flashcard {idx}:**")
-                        st.write(f"Q: {fc.get('question', '')}")
-                        st.write(f"A: {fc.get('answer', '')}")
-                        st.write(f"Saved on: {fc.get('timestamp', '')}")
-                        st.write("---")
-                if st.button("Delete Session", key=f"delete_session_{session_id}"):
-                    delete_session(session_id)
-                    st.success("Session deleted.")
-                    st.rerun()
-        else:
-            st.info("No saved flashcard sessions available.")
-    
-    # ---------------------- COMMUNITY SECTION --------------------------------------
+            for session_id, session_name, flashcards, created_at in sessions:
+                with st.expander(f"{session_name} (Created on {created_at})"):
+                    flashcard_list = json.loads(flashcards)
+                    selected_flashcards = []
+                    for idx, fc in enumerate(flashcard_list, start=1):
+                        if st.checkbox(f"Select Flashcard {idx}", key=f"select_flashcard_{session_id}_{idx}"):
+                            selected_flashcards.append(fc)
+                        st.markdown(f"**Question:** {fc.get('question', 'No Question')}")
+                        st.markdown(f"**Answer:** {fc.get('answer', 'No Answer')}")
+
+                    community_name = st.text_input("Community Name", key=f"community_name_{session_id}")
+                    community_desc = st.text_area("Community Description", key=f"community_desc_{session_id}")
+                    if st.button("Create Community", key=f"create_community_{session_id}"):
+                        if community_name and community_desc:
+                            if selected_flashcards:
+                                create_community(community_name, community_desc, selected_flashcards)
+                                st.success(f"Community '{community_name}' created!")
+                                st.rerun()  # Refresh to show new community
+                            else:
+                                st.error("Please select at least one flashcard to add to the community.")
+                        else:
+                            st.error("Please provide both a community name and description.")
+
+        # Display created communities
+        st.subheader("Your Created Communities")
+        owned_communities = get_owned_communities(st.session_state["user"])
+        if owned_communities:
+            for idx, (community_id, community_name, flashcards) in enumerate(owned_communities):
+                with st.expander(f"{community_name}"):
+                    st.markdown(format_flashcards(flashcards))
+                    if st.button("Leave Community", key=f"leave_community_{community_id}_{idx}"):
+                        leave_community(community_id)
+                        st.success(f"Left community '{community_name}'!")
+                        st.rerun()  # Refresh to update community list
+
+    # ---------------------- COMMUNITY SECTION ------------------------------------
     elif choice == "Community":
-        st.title("🌐 Community Flashcards")
-        # Retrieve sessions from other users
-        sessions = get_community_sessions(st.session_state["user"])
-        if sessions:
-            for session in sessions:
-                session_id, username, session_name, flashcards_json, created_at = session
-                st.markdown(f"**{session_name}** by **{username}** (Created: {created_at})")
-                try:
-                    flashcards = json.loads(flashcards_json) if flashcards_json else []
-                except Exception:
-                    flashcards = []
-                if flashcards:
-                    for idx, fc in enumerate(flashcards, start=1):
-                        st.write(f"**Flashcard {idx}:**")
-                        st.write(f"Q: {fc.get('question', '')}")
-                        st.write(f"A: {fc.get('answer', '')}")
-                        st.write(f"Saved on: {fc.get('timestamp', '')}")
-                        st.write("---")
-        else:
-            st.info("No community flashcard sessions available.")
+        st.title("🌐 Community")
+        all_communities = get_all_communities()
+        joined_community_ids = get_joined_communities(st.session_state["user"])
+
+        col1, col2 = st.columns([3, 1])
+
+        with col1:
+            st.subheader("Joined Community Flashcards")
+            joined_communities = [comm for comm in all_communities if comm[0] in joined_community_ids and comm[1] != st.session_state["user"]]
+            if joined_communities:
+                for idx, (community_id, owner, community_name, flashcards, created_at) in enumerate(joined_communities):
+                    with st.expander(f"{community_name} by {owner}"):
+                        st.markdown(format_flashcards(flashcards))
+                        if st.button("Leave Community", key=f"leave_community_{community_id}_{idx}"):
+                            leave_community(community_id)
+                            st.success(f"Left community '{community_name}'!")
+                            st.rerun()  # Refresh to update flashcards
+
+        with col2:
+            st.subheader("Community List")
+            available_communities = [comm for comm in all_communities if comm[0] not in joined_community_ids and comm[1] != st.session_state["user"]]
+            if available_communities:
+                for idx, (community_id, owner, community_name, flashcards, created_at) in enumerate(available_communities):
+                    st.write(f"{community_name} by {owner}")
+                    if st.button("Join Community", key=f"join_community_{community_id}_{idx}"):
+                        join_community(community_id)
+                        st.success(f"Joined community '{community_name}'!")
+                        st.rerun()  # Refresh to show joined flashcards
 
 if __name__ == "__main__":
     main()
