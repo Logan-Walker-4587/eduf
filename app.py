@@ -712,6 +712,8 @@ def main():
             st.session_state["flashcard_reveal"] = False
         if "pdf_text" not in st.session_state:
             st.session_state["pdf_text"] = None
+        if "pdf_uploaded_once" not in st.session_state:
+            st.session_state["pdf_uploaded_once"] = False
 
         # ---------------------- SESSION MANAGEMENT ----------------------
         st.sidebar.markdown("### 💬 Chat Sessions")
@@ -724,30 +726,40 @@ def main():
                 st.session_state["active_session_id"] = session_id
                 st.session_state["session_flashcards"] = []
                 st.session_state.pop("pdf_text", None)
+                st.session_state.pop("pdf_uploaded_once", None)
+                st.session_state.pop("pdf_uploader", None) # Ensure uploader state is reset
                 st.success(f"✅ Session '{new_session_name}' created successfully!")
                 st.rerun()
             else:
                 st.sidebar.error("⚠️ Please enter a session name.")
 
         # Fetch existing sessions
-        sessions = get_sessions(st.session_state["user"])
+        user_id = st.session_state.get("user")
+        if user_id:
+            sessions = get_sessions(user_id)
 
-        if sessions:
-            st.sidebar.markdown("### 📂 Your Sessions")
-            session_mapping = {s[1]: s[0] for s in sessions}
-            session_names = list(session_mapping.keys())
+            if sessions:
+                st.sidebar.markdown("### 📂 Your Sessions")
+                session_mapping = {s[1]: s[0] for s in sessions}
+                session_names = list(session_mapping.keys())
 
-            # Dropdown for selecting an existing session
-            selected_session_name = st.sidebar.selectbox("Select a session", session_names)
+                # Dropdown for selecting an existing session
+                selected_session_name = st.sidebar.selectbox("Select a session", session_names)
 
-            if selected_session_name:
-                selected_session_id = session_mapping[selected_session_name]
-                if st.session_state["active_session_id"] != selected_session_id:
-                    st.session_state["active_session_id"] = selected_session_id
-                    selected_session_data = next(s for s in sessions if s[0] == selected_session_id)
-                    st.session_state["session_flashcards"] = json.loads(selected_session_data[2])
-                    st.session_state["pdf_text"] = selected_session_data[3] if selected_session_data[3] else None
-                    st.rerun()
+                if selected_session_name:
+                    selected_session_id = session_mapping[selected_session_name]
+                    if st.session_state["active_session_id"] != selected_session_id:
+                        st.session_state["active_session_id"] = selected_session_id
+                        selected_session_data = next(s for s in sessions if s[0] == selected_session_id)
+                        st.session_state["session_flashcards"] = json.loads(selected_session_data[2])
+                        st.session_state["pdf_text"] = selected_session_data[3] if selected_session_data[3] else None
+                        st.session_state.pop("flashcard_query", None)
+                        st.session_state.pop("current_flashcard_question", None)
+                        st.session_state.pop("current_flashcard_answer", None)
+                        st.session_state.pop("flashcard_reveal", None)
+                        st.session_state.pop("pdf_uploaded_once", None)
+                        st.session_state.pop("pdf_uploader", None) # Ensure uploader state is reset
+                        st.rerun()
 
         # ---------------------- MAIN FLASHCARD FUNCTIONALITY ----------------------
         if st.session_state["active_session_id"] is None:
@@ -755,39 +767,41 @@ def main():
         else:
             uploaded_file = st.file_uploader("Upload PDF", type="pdf", key="pdf_uploader")
 
-            if uploaded_file:
-                if st.session_state["pdf_text"] is None:
+            if uploaded_file is not None:
+                if "pdf_text" not in st.session_state or not st.session_state["pdf_text"] or not isinstance(st.session_state["pdf_text"], str) or not st.session_state["pdf_text"].strip():
+
+                    # Extract text only if a new file is uploaded
                     pdf_text = extract_text_from_pdf(uploaded_file)
-                    st.session_state["pdf_text"] = pdf_text
+                    st.session_state["pdf_text"] = pdf_text if isinstance(pdf_text, str) and pdf_text.strip() else ""
 
                     # Save PDF content to session
                     conn = sqlite3.connect("users.db")
                     c = conn.cursor()
-                    c.execute("UPDATE sessions SET pdf_content=? WHERE id=?", 
+                    c.execute("UPDATE sessions SET pdf_content=? WHERE id=?",
                               (pdf_text, st.session_state["active_session_id"]))
                     conn.commit()
                     conn.close()
 
-                    if "pdf_uploaded_once" not in st.session_state:
-                        st.session_state["analytics"]["pdfs_uploaded"] += 1
-                        update_user_analytics(st.session_state["user"], st.session_state["analytics"])
-                        st.session_state["pdf_uploaded_once"] = True
-                    st.rerun()
+                    # Mark as uploaded
+                    st.session_state["pdf_uploaded_once"] = True
+                    st.rerun()  # Rerun to reflect changes immediately
 
-            if "pdf_text" in st.session_state:
+            # Display warning only if no PDF has been uploaded yet
+            if "pdf_text" not in st.session_state or not isinstance(st.session_state["pdf_text"], str) or not st.session_state["pdf_text"].strip():
+                st.warning("📂 Please upload a PDF to generate flashcards.")
+            else:
                 pdf_text = st.session_state["pdf_text"]
-
                 # ---------------------- FLASHCARD INPUT & GENERATION ----------------------
                 user_input = st.text_input(
-                    "Enter topic/question for flashcards (optional):", 
-                    value=st.session_state["flashcard_query"], 
+                    "Enter topic/question for flashcards (optional):",
+                    value=st.session_state["flashcard_query"],
                     key="flashcard_input"
                 )
 
                 # Reset flashcards when input changes
                 if user_input.strip() and user_input != st.session_state["flashcard_query"]:
                     st.session_state["flashcard_query"] = user_input
-                    st.session_state["current_flashcard_question"] = None  
+                    st.session_state["current_flashcard_question"] = None
                     st.session_state["current_flashcard_answer"] = ""
                     st.session_state["flashcard_reveal"] = False
                     st.rerun()
@@ -796,7 +810,7 @@ def main():
                 if st.session_state["current_flashcard_question"] is None:
                     topic = st.session_state["flashcard_query"] if st.session_state["flashcard_query"].strip() else "general concepts"
                     question = generate_flashcard_question_groq(st.session_state["pdf_text"], topic)
-                    
+
                     st.session_state["current_flashcard_question"] = question
                     st.session_state["current_flashcard_answer"] = ""
                     st.session_state["flashcard_reveal"] = False
@@ -845,7 +859,7 @@ def main():
                         if community_names:
                             selected_communities = st.multiselect(
                                 "Select Communities to Share Flashcard",
-                                community_names, 
+                                community_names,
                                 key="share_flashcard_direct"
                             )
 
@@ -868,7 +882,7 @@ def main():
 
                                     if shared:
                                         st.success("Flashcard shared successfully!")
-                                        st.session_state["selected_communities"] = []  # Reset list safely
+                                        st.session_state["selected_communities"] = set()
                                         st.rerun()
                                     else:
                                         st.error("Failed to share flashcard. Please try again.")
@@ -885,38 +899,38 @@ def main():
                                     "answer": safe_answer,
                                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
                                 }
-                                
+
                                 try:
-                                    st.session_state.setdefault("session_flashcards", [])
+                                    st.session_state.setdefault("session_flashcards",)
                                     st.session_state["session_flashcards"].append(flashcard_data)
-                                    update_session_flashcards(st.session_state["active_session_id"], 
+                                    update_session_flashcards(st.session_state["active_session_id"],
                                                            st.session_state["session_flashcards"])
                                     st.success("Flashcard added to session.")
-                                
-                                # Share flashcard to communities if user is a member of any
-                                user_communities = get_user_communities(st.session_state["user"])
-                                if user_communities:
-                                    st.session_state.setdefault("selected_communities", set())
-                                    st.write("### Share with Communities")
-                                    for community in user_communities:
-                                        if st.checkbox(f"Share to {community[1]}", key=f"share_{community[0]}"):
-                                            st.session_state["selected_communities"].add(community[0])
-                                    
-                                    if st.session_state["selected_communities"] and st.button("Share to Selected Communities"):
-                                        success = share_flashcard_to_community(
-                                            list(st.session_state["selected_communities"]),
-                                            json.dumps(flashcard_data),
-                                            st.session_state["user"]
-                                        )
-                                        if success:
-                                            st.success("Flashcard shared successfully to selected communities!")
-                                            st.session_state["selected_communities"].clear()
-                                            st.rerun()
-                                        else:
-                                            st.error("Failed to share flashcard. Please try again.")
-                                else:
-                                    st.warning("You are not a member of any community. Join one to share flashcards.")
-                                    st.rerun()
+
+                                    # Share flashcard to communities if user is a member of any
+                                    user_communities = get_user_communities(st.session_state["user"])
+                                    if user_communities:
+                                        st.session_state.setdefault("selected_communities", set())
+                                        st.write("### Share with Communities")
+                                        for community in user_communities:
+                                            if st.checkbox(f"Share to {community[1]}", key=f"share_{community[0]}"):
+                                                st.session_state["selected_communities"].add(community[0])
+
+                                        if st.session_state["selected_communities"] and st.button("Share to Selected Communities"):
+                                            success = share_flashcard_to_community(
+                                                list(st.session_state["selected_communities"]),
+                                                json.dumps(flashcard_data),
+                                                st.session_state["user"]
+                                            )
+                                            if success:
+                                                st.success("Flashcard shared successfully to selected communities!")
+                                                st.session_state["selected_communities"].clear()
+                                                st.rerun()
+                                            else:
+                                                st.error("Failed to share flashcard. Please try again.")
+                                    else:
+                                        st.warning("You are not a member of any community. Join one to share flashcards.")
+                                        st.rerun()
                                 except Exception as e:
                                     st.error(f"Error saving flashcard: {str(e)}")
 
@@ -953,7 +967,7 @@ def main():
                         if community_names:
                             selected_communities = st.multiselect(
                                 f"Share Flashcard {idx} with Communities",
-                                community_names, 
+                                community_names,
                                 key=f"share_flashcard_{idx}"
                             )
 
@@ -985,9 +999,6 @@ def main():
 
                 else:
                     st.info("No flashcards saved in this session yet.")
-
-            else:
-                st.info("Please upload a PDF to generate flashcards.")
 
     # ---------------------- TEST SECTION -----------------------------------
     elif choice == "Test":
