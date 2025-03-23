@@ -339,7 +339,7 @@ def login(username, password):
     conn.close()
     
     if user:
-        if user[2] == password:  # In production, use proper password hashing
+        if user[2] == password:  #
             st.session_state["user"] = username
             # Initialize analytics if not present
             try:
