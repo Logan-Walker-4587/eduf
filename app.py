@@ -1023,7 +1023,21 @@ def main():
     
             # Retrieve the corresponding session ID
             selected_session_id = session_mapping[selected_session_name]
-    
+            
+            # ✅ Fix: Reset test questions when switching sessions
+            if st.session_state.get("active_session_id") != selected_session_id:
+                st.session_state["active_session_id"] = selected_session_id
+                st.session_state.pop("pdf_text", None)  # Reset PDF when switching sessions
+                st.session_state.pop("test_questions", None)  # ✅ Clear test questions for new session
+
+            # ✅ Fix: Clear test questions when user navigates away and comes back
+            if "last_visited_section" not in st.session_state:
+                st.session_state["last_visited_section"] = "Test"
+
+            if st.session_state["last_visited_section"] != "Test":
+                st.session_state.pop("test_questions", None)  # ✅ Clear test questions when returning to Test section
+                st.session_state["last_visited_section"] = "Test"    
+            
             # Ensure the selected session is active
             if st.session_state.get("active_session_id") != selected_session_id:
                 st.session_state["active_session_id"] = selected_session_id
@@ -1046,14 +1060,14 @@ def main():
             if "pdf_text" not in st.session_state or not st.session_state["pdf_text"]:
                 st.info("No PDF found for the selected chat session. Please upload a PDF in the Flashcards section.")
             else:
-                # Generate test questions if not already generated
-                if "test_questions" not in st.session_state:
-                    if st.button("Generate Test Questions"):
-                        test_questions = generate_test_questions_groq(st.session_state["pdf_text"])
-                        if test_questions:
-                            st.session_state["test_questions"] = test_questions
-                        else:
-                            st.error("Failed to generate test questions. Please try again.")
+                # ✅ Fix: Always allow generating a new test after switching sessions
+                if st.button("Generate Test Questions"):
+                    st.session_state.pop("test_questions", None)  # ✅ Reset test questions when regenerating
+                    test_questions = generate_test_questions_groq(st.session_state["pdf_text"])
+                    if test_questions:
+                        st.session_state["test_questions"] = test_questions
+                    else:
+                        st.error("Failed to generate test questions. Please try again.")
     
                 # Display test questions if they exist
                 if "test_questions" in st.session_state:
@@ -1113,7 +1127,7 @@ def main():
                             st.write("---")
 
                         # Clear test questions after submission
-                        del st.session_state["test_questions"]
+                        st.session_state.pop("test_questions", None)
     # ---------------------- SAVED FLASHCARDS SECTION -------------------------------
     elif choice == "Saved Flashcards":
         st.title("Saved Flashcard Sessions")
@@ -1140,15 +1154,26 @@ def main():
         else:
             st.info("No saved flashcard sessions available.")
 
-    # ---------------------- COMMUNITY SECTION -------------------------------------
+# ---------------------- COMMUNITY SECTION -------------------------------------
     elif choice == "Community":
         st.title("Community Management")
 
-        # Fetch all communities the user is part of
-        all_communities = get_user_communities(st.session_state["user"])
+        # ✅ Fetch all communities the user is part of
+        user_communities = get_user_communities(st.session_state["user"])
         selected_community_id = None  # Initialize with None
 
-        # Create Community Section
+        # ✅ NEW: Fetch all available communities (including ones user hasn't joined)
+        conn = sqlite3.connect("users.db")
+        c = conn.cursor()
+        c.execute("SELECT id, name FROM communities")  # Fetch all communities
+        all_communities = c.fetchall()
+        conn.close()
+
+        # ✅ NEW: Filter out already joined communities
+        joined_community_ids = {c[0] for c in user_communities}  # Get IDs of joined communities
+        available_communities = [(c[0], c[1]) for c in all_communities if c[0] not in joined_community_ids]
+
+        # ---------------------- Create Community Section ----------------------
         with st.expander("Create Community", expanded=False):
             community_name = st.text_input("Community Name")
             community_description = st.text_area("Description (optional)")
@@ -1159,54 +1184,50 @@ def main():
                 new_community_id = create_community(community_name, community_description)
                 if new_community_id:
                     st.success(f"Community '{community_name}' created successfully! ")
-                    st.session_state['refresh'] = True
+                    st.session_state['refresh'] = True  # ✅ Refresh session after creating
                     st.rerun()
 
-        # Search & Join Community Section
-        st.subheader("Search & Join Communities")
-        search_query = st.text_input("Search for communities...")
-        if search_query:
-            conn = sqlite3.connect("users.db")
-            c = conn.cursor()
-            c.execute("SELECT * FROM communities WHERE name LIKE ?", (f'%{search_query}%',))
-            search_results = c.fetchall()
-            conn.close()
+        # ---------------------- Search & Join Community Section ----------------------
+        st.subheader("Join a Community")
 
-            if search_results:
-                for community in search_results:
-                    st.write(f"**{community[1]}**: {community[2]}")
-                    if st.button(f"Join {community[1]}", key=f"join_{community[0]}"):
-                        join_community(community[0], st.session_state["user"])
-                        st.success(f"Joined {community[1]} successfully! ")
-                        st.session_state['refresh'] = True
-                        st.rerun()
-            else:
-                st.write("No communities found matching your search.")
+        # ✅ NEW: Show dropdown of available communities to join
+        if available_communities:
+            community_options = {c[1]: c[0] for c in available_communities}  # Mapping of {name: id}
+            selected_join_community = st.selectbox("Available Communities", list(community_options.keys()))
 
-        # If User Has Communities
-        if all_communities:
+            if st.button("Join Community"):
+                community_id_to_join = community_options[selected_join_community]
+                join_community(community_id_to_join, st.session_state["user"])
+                st.success(f"Joined '{selected_join_community}' successfully!")
+                st.session_state['refresh'] = True  # ✅ Refresh session after joining
+                st.rerun()
+        else:
+            st.info("No new communities available to join.")
+
+        # ---------------------- If User Has Communities ----------------------
+        if user_communities:
             # Extract community names
-            community_names = [community[1] for community in all_communities]
+            community_names = [community[1] for community in user_communities]
 
             # Select a community for viewing
             selected_community_name = st.selectbox("Select Community", community_names, key="selected_community")
 
             # Find the corresponding community ID
-            selected_community_id = next((c[0] for c in all_communities if c[1] == selected_community_name), None)
+            selected_community_id = next((c[0] for c in user_communities if c[1] == selected_community_name), None)
 
             if selected_community_id is None:
                 st.error("Selected community not found")
                 return
 
-            # Check if the user is the creator of the community
+            # ✅ Check if the user is the creator of the community
             conn = sqlite3.connect("users.db")
             c = conn.cursor()
             c.execute("SELECT id FROM communities WHERE id=? AND id IN (SELECT community_id FROM community_members WHERE username=?)",
-                      (selected_community_id, st.session_state["user"]))
+                    (selected_community_id, st.session_state["user"]))
             is_creator = c.fetchone()
             conn.close()
 
-            # Show Leave and Delete buttons immediately after selection
+            # ✅ NEW: Show Leave and Delete buttons immediately after selection
             col1, col2 = st.columns(2)
 
             with col1:
@@ -1215,7 +1236,7 @@ def main():
                         success = leave_selected_community(selected_community_id, st.session_state["user"])
                         if success:
                             st.success(f"Left community '{selected_community_name}' successfully!")
-                            st.session_state['refresh'] = True
+                            st.session_state['refresh'] = True  # ✅ Refresh session after leaving
                             st.rerun()
                         else:
                             st.error("Failed to leave the community.")
@@ -1225,12 +1246,12 @@ def main():
                     if st.button("Delete Community", key="delete_community"):
                         delete_community(selected_community_id)
                         st.success(f"Community '{selected_community_name}' deleted successfully!")
-                        st.session_state['refresh'] = True
+                        st.session_state['refresh'] = True  # ✅ Refresh session after deletion
                         st.rerun()
                 else:
                     st.warning("You cannot delete this community as you are not the creator.")
 
-            # Show shared flashcards for the selected community
+            # ---------------------- Show Shared Flashcards ----------------------
             conn = sqlite3.connect("users.db")
             c = conn.cursor()
             c.execute("SELECT * FROM community_flashcards WHERE community_id=?", (selected_community_id,))
@@ -1241,14 +1262,14 @@ def main():
             if shared_flashcards:
                 for flashcard in shared_flashcards:
                     try:
-                        # Parse JSON data from the database
+                        # ✅ Parse JSON data from the database
                         flashcard_data = json.loads(flashcard[2])
 
                         question = flashcard_data.get("question", "No question available")
                         answer = flashcard_data.get("answer", "No answer available")
                         timestamp = flashcard_data.get("timestamp", "Unknown date")
 
-                        # Display Flashcard UI
+                        # ✅ Display Flashcard UI
                         with st.container():
                             st.markdown(f"""
                             <div style="
@@ -1263,7 +1284,7 @@ def main():
                             </div>
                             """, unsafe_allow_html=True)
 
-                            # Show Answer Toggle
+                            # ✅ Show Answer Toggle
                             if st.button(f"Show Answer", key=f"show_answer_{flashcard[0]}"):
                                 st.markdown(f"""
                                 <div style="
@@ -1283,12 +1304,14 @@ def main():
                         st.error("Error displaying flashcard. Invalid data format.")
             else:
                 st.info("No flashcards have been shared yet in this community.")
+
         else:
             st.info("You are currently not a member of any communities. Create one or search for existing communities to join!")
 
-    if 'refresh' in st.session_state:
-        del st.session_state['refresh']
-        st.rerun()
+        # ✅ Ensure instant UI updates
+        if 'refresh' in st.session_state:
+            del st.session_state['refresh']
+            st.rerun()
 
 if __name__ == "__main__":
     main()
